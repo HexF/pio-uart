@@ -53,7 +53,7 @@
 use rp2040_hal::{
     gpio::{Pin, PinId, PullNone, PullUp},
     pio::{
-        self, InstallError, InstalledProgram, PIOBuilder, PIOExt, ShiftDirection, StateMachine,
+        self, InstallError, InstalledProgram, PIOBuilder, PIOExt, PioIRQ, ShiftDirection, StateMachine,
         StateMachineIndex, UninitStateMachine,
     },
 };
@@ -139,17 +139,27 @@ impl<PinID: PinId, PIO: PIOExt, SM: StateMachineIndex> PioUartRx<PinID, PIO, SM,
     /// - `rx_program`: The installed Rx program.
     /// - `baud`: Desired baud rate.
     /// - `system_freq`: System frequency.
+    /// - `not_empty_irq`: Optional IRQ to raise when the FIFO buffer is not empty.
     pub fn new(
         rx_pin: Pin<PinID, PIO::PinFunction, PullUp>,
         rx_sm: UninitStateMachine<(PIO, SM)>,
         rx_program: &mut RxProgram<PIO>,
         baud: fugit::HertzU32,
         system_freq: fugit::HertzU32,
+        not_empty_irq: Option<PioIRQ>,
     ) -> Self {
         let div = system_freq.to_Hz() as f32 / (8f32 * baud.to_Hz() as f32);
         let rx_id = rx_pin.id().num;
 
         let (rx_sm, rx, tx) = Self::build_rx(rx_program, rx_id, rx_sm, div);
+        
+        match not_empty_irq {
+            None => {},
+            Some(irq) => {
+                rx.enable_rx_not_empty_interrupt(irq);
+            }
+        }
+
 
         Self {
             rx,
@@ -316,7 +326,7 @@ impl<RXID: PinId, TXID: PinId, PIO: PIOExt> PioUart<RXID, TXID, PIO, pio::Stoppe
         let (mut pio, sm0, sm1, sm2, sm3) = pio.split(resets);
         let mut rx_program = install_rx_program(&mut pio).ok().unwrap(); // Should never fail, because no program was loaded yet
         let mut tx_program = install_tx_program(&mut pio).ok().unwrap(); // Should never fail, because no program was loaded yet
-        let rx = PioUartRx::new(rx_pin, sm0, &mut rx_program, baud, system_freq);
+        let rx = PioUartRx::new(rx_pin, sm0, &mut rx_program, baud, system_freq, None);
         let tx = PioUartTx::new(tx_pin, sm1, &mut tx_program, baud, system_freq);
         Self {
             rx,
@@ -474,6 +484,13 @@ impl<PinID: PinId, PIO: PIOExt, SM: StateMachineIndex> embedded_io::Read
 {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         self.read_raw(buf).map_err(|_| PioSerialError::IO)
+    }
+}
+impl<PinID: PinId, PIO: PIOExt, SM: StateMachineIndex> embedded_io::ReadReady
+    for PioUartRx<PinID, PIO, SM, pio::Running>
+{
+    fn read_ready(&mut self) -> Result<bool, Self::Error> {
+        Ok(!self.rx.is_empty())
     }
 }
 impl<PinID: PinId, PIO: PIOExt, SM: StateMachineIndex> embedded_io::Write
